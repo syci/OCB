@@ -98,8 +98,8 @@ class crm_helpdesk(osv.osv):
     def write(self, cr, uid, ids, values, context=None):
         """ Override to add case management: open/close dates """
         if values.get('state'):
-            if values.get('state') in ['draft', 'open'] and not values.get('date_open'):
-                values['date_open'] = fields.datetime.now()
+            if values.get('state') in ['draft', 'open'] and not values.get('date'):
+                values['date'] = fields.datetime.now()
             elif values.get('state') == 'done' and not values.get('date_closed'):
                 values['date_closed'] = fields.datetime.now()
         return super(crm_helpdesk, self).write(cr, uid, ids, values, context=context)
