@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 
 from markupsafe import Markup
 from stdnum.be import vat as be_vat
@@ -1273,6 +1274,7 @@ class AccountEdiUBL(models.AbstractModel):
         }
 
     def _ubl_add_line_period_nodes(self, vals):
+        # DEPRECATED
         nodes = vals['line_node']['cac:InvoicePeriod'] = []
 
         if self._is_document(vals, 'invoice', 'credit_note', 'self_invoice', 'self_credit_note'):
@@ -1601,7 +1603,6 @@ class AccountEdiUBL(models.AbstractModel):
         self._ubl_add_line_invoiced_quantity_node(vals)
         self._ubl_add_line_allowance_charge_nodes(vals)
         self._ubl_add_line_extension_amount_node(vals)
-        self._ubl_add_line_period_nodes(vals)
         self._ubl_add_line_pricing_reference_node(vals)
         self._ubl_add_line_tax_totals_nodes(vals)
         self._ubl_add_line_item_node(vals)
@@ -1619,7 +1620,6 @@ class AccountEdiUBL(models.AbstractModel):
         self._ubl_add_line_credited_quantity_node(vals)
         self._ubl_add_line_allowance_charge_nodes(vals)
         self._ubl_add_line_extension_amount_node(vals)
-        self._ubl_add_line_period_nodes(vals)
         self._ubl_add_line_pricing_reference_node(vals)
         self._ubl_add_line_tax_totals_nodes(vals)
         self._ubl_add_line_item_node(vals)
@@ -1637,7 +1637,6 @@ class AccountEdiUBL(models.AbstractModel):
         self._ubl_add_line_debited_quantity_node(vals)
         self._ubl_add_line_allowance_charge_nodes(vals)
         self._ubl_add_line_extension_amount_node(vals)
-        self._ubl_add_line_period_nodes(vals)
         self._ubl_add_line_pricing_reference_node(vals)
         self._ubl_add_line_tax_totals_nodes(vals)
         self._ubl_add_line_item_node(vals)
@@ -2611,6 +2610,20 @@ class AccountEdiUBL(models.AbstractModel):
             partner_create_values['vat'] = customer_values['vat']
         return partner_create_values
 
+    def _check_customer_vat_match(self, customer, vat, collected_values):
+        """
+        Compare the VAT from an EDI document against a partner's stored VAT,
+        with country-specific normalization where needed.
+        Should stay consistent with `_get_country_specific_vat_variants`.
+        """
+        country = self._import_ubl_get_country(collected_values)
+        customer_vat = customer.vat.replace(' ', '').upper()
+        vat_to_compare = vat.replace(' ', '').replace('.', '').upper()
+        if country.code == 'CH':
+            customer_vat = re.sub(r"(TVA|IVA|MWST)?$", "", customer_vat.replace('.', '').replace('-', ''))
+            vat_to_compare = re.sub(r"(TVA|IVA|MWST)?$", "", vat_to_compare.replace('-', ''))
+        return customer_vat == vat_to_compare
+
     def _import_ubl_create_missing_customer(self, collected_values):
         customer_values = collected_values['customer_values']
         logs = collected_values['logs']
@@ -2628,7 +2641,7 @@ class AccountEdiUBL(models.AbstractModel):
                 if self.env['res.partner']._run_vat_test(vat, country, True):
                     customer.vat = vat
                 return
-            if customer.vat.replace(' ', '') == vat.replace(' ', '').replace('.', ''):
+            if self._check_customer_vat_match(customer, vat, collected_values):
                 return
             vat_mismatch = True
 
@@ -2881,11 +2894,16 @@ class AccountEdiUBL(models.AbstractModel):
             if not category_code:
                 continue
 
+            tax_key = frozendict({
+                'category_code': category_code,
+                'percentage': percentage,
+            })
             allowance_charge_values['attempt_tax_values'] = tax_values = {
                 'amount_type': 'percent',
                 'type_tax_use': odoo_document_type,
                 'ubl_cii_tax_category_code': category_code,
                 'amount': percentage,
+                '_tax_key': tax_key,
             }
             taxes_values.append(tax_values)
 
@@ -3122,6 +3140,7 @@ class AccountEdiUBL(models.AbstractModel):
         }
 
     def _import_ubl_invoice_line_add_deferred_dates(self, collected_values):
+        # DEPRECATED
         if not self.module_installed('account_accountant'):
             return
 
@@ -3248,10 +3267,9 @@ class AccountEdiUBL(models.AbstractModel):
                 # Extract information about allowance / charges.
                 self._import_ubl_invoice_line_add_allowance_charges_values(line_collected_values)
 
-                # name / quantity / price_unit / discount / deferred_start_date / deferred_end_date
+                # name / quantity / price_unit / discount
                 self._import_ubl_invoice_line_add_name(line_collected_values)
                 self._import_ubl_invoice_line_add_price_unit_quantity_discount(line_collected_values)
-                self._import_ubl_invoice_line_add_deferred_dates(line_collected_values)
 
                 # product / product_uom / taxes
                 self._import_ubl_invoice_line_add_product_values(line_collected_values)
@@ -3264,6 +3282,7 @@ class AccountEdiUBL(models.AbstractModel):
     def _import_ubl_retrieve_taxes_search_plan(self, collected_values):
         AccountTax = self.env['account.tax']
         return [
+            AccountTax._import_retrieve_tax_from_account_default_tax,
             AccountTax._import_retrieve_tax_from_invoice_predictive,
             AccountTax._import_retrieve_tax_from_price_include_exclude,
         ]
@@ -3274,6 +3293,9 @@ class AccountEdiUBL(models.AbstractModel):
         lines_collected_values = collected_values['lines_collected_values']
         tax_values_list = list(collected_values['taxes_values'])
         for line_collected_values in lines_collected_values:
+            if account := line_collected_values['account_values'].get('account'):
+                for tax_values in line_collected_values['taxes_values']:
+                    tax_values['account'] = account
             tax_values_list += line_collected_values['taxes_values']
             for charge in line_collected_values['charges']:
                 if tax_values := charge.get('attempt_tax_values'):
@@ -3293,6 +3315,11 @@ class AccountEdiUBL(models.AbstractModel):
             company=company,
             tax_values_list=tax_values_list,
         )
+
+        for tax_values in collected_values['taxes_values']:
+            tax_key = tax_values.get('_tax_key')
+            if tax_key and (global_tax_values := collected_values['tax_total_values'].get(tax_key)):
+                global_tax_values['related_taxes_values'].append(tax_values)
 
         # Taxes at the document line level.
         for line_collected_values in lines_collected_values:
@@ -3378,10 +3405,6 @@ class AccountEdiUBL(models.AbstractModel):
 
         if name := collected_values.get('name'):
             base_line_kwargs['_create_values']['name'] = name
-        if deferred_start_date := to_write.get('deferred_start_date'):
-            base_line_kwargs['_create_values']['deferred_start_date'] = deferred_start_date
-        if deferred_end_date := to_write.get('deferred_end_date'):
-            base_line_kwargs['_create_values']['deferred_end_date'] = deferred_end_date
 
         base_line_kwargs['_create_values'] = {
             **base_line_kwargs['_create_values'],
@@ -3564,9 +3587,18 @@ class AccountEdiUBL(models.AbstractModel):
 
         # Fix 'price_unit' if some price-included taxes are involved.
         for base_line in base_lines:
-            for tax_data in base_line['tax_details']['taxes_data']:
-                if tax_data['tax'].price_include:
-                    base_line['price_unit'] += tax_data['raw_tax_amount_currency'] / (base_line['quantity'] if base_line['quantity'] else 1)
+            if base_line['discount'] != 100:
+                for tax_data in base_line['tax_details']['taxes_data']:
+                    if tax_data['tax'].price_include:
+                        discount = base_line['discount'] / 100
+                        raw_tax_amount_currency = tax_data['raw_tax_amount_currency'] / (1 - discount)
+                        base_line['price_unit'] += raw_tax_amount_currency / (base_line['quantity'] if base_line['quantity'] else 1)
+            else:
+                new_base_line = AccountTax._prepare_base_line_for_taxes_computation(record=base_line, discount=0.0, special_mode="total_excluded")
+                AccountTax._add_tax_details_in_base_lines([new_base_line], company)
+                for tax_data in new_base_line['tax_details']['taxes_data']:
+                    if tax_data['tax'].price_include:
+                        base_line['price_unit'] += tax_data['raw_tax_amount_currency'] / (base_line['quantity'] if base_line['quantity'] else 1)
 
         # Remove lines having a zero amount except 100% discounts
         collected_values['base_lines'] = [

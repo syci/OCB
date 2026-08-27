@@ -12,6 +12,7 @@ from markupsafe import Markup
 import math
 import re
 import os
+import warnings
 from textwrap import shorten
 from urllib.parse import urlencode
 
@@ -793,7 +794,8 @@ class AccountMove(models.Model):
                         move.invoice_user_id
                         or move.partner_id.user_id
                         or move.partner_id.commercial_partner_id.user_id
-                        or self.env.user
+                        or self.env.user._is_internal() and self.env.user
+                        or move.create_uid
                     )
             else:
                 move.invoice_user_id = False
@@ -1410,7 +1412,7 @@ class AccountMove(models.Model):
             domain = [
                 ('account_id', 'in', pay_term_lines.account_id.ids),
                 ('parent_state', '=', 'posted'),
-                *move._check_company_domain(move.company_id),
+                '|', *move._check_company_domain(move.company_id), ('company_id', 'child_of', move.company_id.id),
                 ('partner_id', '=', move.commercial_partner_id.id),
                 ('reconciled', '=', False),
                 '|', ('amount_residual', '!=', 0.0), ('amount_residual_currency', '!=', 0.0),
@@ -1856,7 +1858,7 @@ class AccountMove(models.Model):
     @api.depends('company_id', 'partner_id', 'tax_totals', 'currency_id')
     def _compute_partner_credit_warning(self):
         for move in self:
-            move.with_company(move.company_id)
+            move = move.with_company(move.company_id)
             move.partner_credit_warning = ''
             show_warning = move.state == 'draft' and \
                            move.move_type == 'out_invoice' and \
@@ -2820,10 +2822,12 @@ class AccountMove(models.Model):
                 })
 
             elif self.invoice_cash_rounding_id.strategy == 'add_invoice_line':
-                if diff_balance > 0.0 and self.invoice_cash_rounding_id.loss_account_id:
-                    account_id = self.invoice_cash_rounding_id.loss_account_id.id
+                # profit_account_id / loss_account_id are company-dependent
+                cash_rounding = self.invoice_cash_rounding_id.with_company(self.company_id)
+                if diff_balance > 0.0 and cash_rounding.loss_account_id:
+                    account_id = cash_rounding.loss_account_id.id
                 else:
-                    account_id = self.invoice_cash_rounding_id.profit_account_id.id
+                    account_id = cash_rounding.profit_account_id.id
                 rounding_line_vals.update({
                     'name': self.invoice_cash_rounding_id.name,
                     'account_id': account_id,
@@ -5619,6 +5623,7 @@ class AccountMove(models.Model):
         self.sending_data = False
 
         self._detach_attachments()
+        return True
 
     def _get_fields_to_detach(self):
         """"
@@ -6369,9 +6374,11 @@ class AccountMove(models.Model):
                 'company_email': journal_alias_company.email or self.env.company.email,
                 'company_name': journal_alias_company.name or self.env.company.name,
             })
-            self._routing_create_bounce_email(
+            reply_to_journal_company = journal_alias_company.email or self.env.company.email
+            self.with_company(journal_alias_company)._routing_create_bounce_email(
                 message_dict['from'], body, message,
-                references=f'{message_dict["message_id"]} {generate_tracking_message_id("loop-detection-bounce-email")}')
+                references=f'{message_dict["message_id"]} {generate_tracking_message_id("loop-detection-bounce-email")}',
+                reply_to=reply_to_journal_company)
             return ()
         return super()._routing_check_route(message, message_dict, route, raise_exception=raise_exception)
 
@@ -6591,6 +6598,7 @@ class AccountMove(models.Model):
     # -------------------------------------------------------------------------
 
     def _get_moves_zip_export_docs(self):
+        warnings.warn("The '_get_moves_zip_export_docs' method is deprecated and has been removed in future versions.", DeprecationWarning)
         docs = set()
         for move in self.filtered(lambda m: m.state == 'posted' and m.is_sale_document()):
             try:
@@ -6603,6 +6611,7 @@ class AccountMove(models.Model):
         return docs, filename
 
     def action_export_zip(self):
+        warnings.warn("The 'action_export_zip' method is deprecated and has been removed in future versions.", DeprecationWarning)
         attachment_ids, filename = self._get_moves_zip_export_docs()
         if not attachment_ids:
             raise UserError(_('Nothing to export.'))
